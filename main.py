@@ -7,10 +7,10 @@ from datetime import datetime
 from pathlib import Path
 from threading import Lock
 
-import anthropic
 import genanki
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
 
 
@@ -49,7 +49,11 @@ FILE_TTL_SECONDS = 3600
 _registry: dict[str, dict] = {}
 _registry_lock = Lock()
 
-client = anthropic.Anthropic()
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENROUTER_API_KEY"],
+)
 app = FastAPI(title="Anki Flashcard Generator")
 
 SYSTEM_PROMPT = """You extract high-quality Anki flashcards from arbitrary text.
@@ -97,14 +101,16 @@ def extract_flashcards(req: GenerateRequest) -> FlashcardDeck:
         f"<source>\n{req.text}\n</source>"
     )
 
-    response = client.messages.parse(
-        model="claude-opus-4-7",
+    response = client.beta.chat.completions.parse(
+        model=OPENROUTER_MODEL,
         max_tokens=16000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-        output_format=FlashcardDeck,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        response_format=FlashcardDeck,
     )
-    deck = response.parsed_output
+    deck = response.choices[0].message.parsed
     if deck is None:
         raise HTTPException(status_code=502, detail="Model did not return a parseable flashcard set.")
     return deck
@@ -139,8 +145,8 @@ def generate(req: GenerateRequest, bg: BackgroundTasks) -> GenerateResponse:
 
     try:
         deck_data = extract_flashcards(req)
-    except anthropic.APIStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Model error: {e.message}") from e
+    except OpenAIError as e:
+        raise HTTPException(status_code=502, detail=f"Model error: {e}") from e
 
     if not deck_data.cards:
         raise HTTPException(status_code=422, detail="No flashcards could be extracted from the text.")
